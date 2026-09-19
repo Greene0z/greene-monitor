@@ -1,26 +1,17 @@
-# Assets e licenças — V2.3
+# Assets e licenças — Greene Monitor 2.4
 
-## Personagem
-Os sprites da V2.3 não usam imagens externas.
+## Pixel art atual
 
-O personagem é desenhado em tempo real pelo `app.js` com SVG em coordenadas inteiras e `shape-rendering="crispEdges"`, produzindo o visual pixel art.
+O avatar, pets e quarto/base da V2.4 são desenhados proceduralmente pelo próprio frontend com SVG e formas geométricas em coordenadas inteiras, preservando a estética pixel art.
 
-Partes atuais:
-- corpo/base;
-- tons de pele;
-- olhos;
-- cabelos;
-- cores de cabelo;
-- roupas;
-- cores de roupa;
-- acessórios.
+Nenhum sprite, textura ou imagem de terceiros foi incorporado ao pacote V2.4.
 
-Isso torna o conjunto visual original do projeto e evita dependência de licenças de packs externos.
+Os ícones PWA `icon-192.png` e `icon-512.png` também foram criados especificamente para este pacote.
 
-## Política para futuras expansões
-Caso a V2.4 use móveis, cenários ou outros assets externos:
-1. priorizar CC0;
-2. guardar os arquivos no próprio projeto/Storage;
-3. nunca fazer hotlink;
-4. registrar fonte, autor e licença neste arquivo;
-5. evitar misturar packs com direções de arte incompatíveis.
+## Regra para futuras expansões
+
+Caso uma versão futura incorpore assets externos:
+- priorizar CC0;
+- registrar fonte, autor e licença neste arquivo;
+- armazenar uma cópia autorizada no projeto/Storage em vez de hotlink;
+- evitar misturar direções de arte incompatíveis.

@@ -23,14 +23,16 @@ let S = {
   profile:null, gameProfile:null, gameInventory:[], gameAchievements:[], gameQuests:[], gameQuestProgress:[], gameItems:[], achievementDefs:[], achievementProgress:[], gameStats:{},
   rpgTab:"overview", notesPage:0, notesHasMore:false,
   analyticsRange:30, analyticsCustomStart:"", analyticsCustomEnd:"", analytics:null,
-  loadedMonths:new Set(),
+  loadedMonths:new Set(), retrospectiveYearLoaded:false, timelineCanLoadMore:true, timelineVisibleDays:180,
+  searchResults:[], syncState:"loading"
 };
 
 const nav = [
-  ["CORE"], ["today","⌂ Hoje"], ["calendar","▦ Calendário"], ["habits","✓ Hábitos"], ["notes","▤ Notas"],
+  ["CORE"], ["today","⌂ Hoje"], ["calendar","▦ Calendário"], ["timeline","≋ Timeline"], ["habits","✓ Hábitos"], ["notes","▤ Notas"],
   ["ACOMPANHAMENTO"], ["books","▥ Leituras"], ["studies","◷ Estudos"], ["goals","◎ Objetivos"],
   ["RPG"], ["rpg","✦ Personagem"],
-  ["ANÁLISE"], ["analysis","⌁ Análises"], ["settings","⚙ Configurações"]
+  ["ANÁLISE"], ["analysis","⌁ Análises"], ["retrospective","◫ Retrospectiva"],
+  ["SISTEMA"], ["settings","⚙ Configurações"], ["privacy","◉ Privacidade"]
 ];
 $("#desktopNav").innerHTML = nav.map(x => x.length===1 ? `<div class="nav-group">${x[0]}</div>` : `<button class="nav" data-go="${x[0]}">${x[1]}</button>`).join("");
 $("#mobileNav").innerHTML = [
@@ -40,8 +42,22 @@ $("#dateText").textContent = new Date().toLocaleDateString("pt-BR", {weekday:"lo
 
 document.documentElement.dataset.theme = localStorage.getItem("greene-theme") || "light";
 document.documentElement.dataset.accent = localStorage.getItem("greene-accent") || "sage";
+document.documentElement.dataset.pack = localStorage.getItem("greene-theme-pack") || "minimal";
 const rememberedName = localStorage.getItem("greene-app-name");
 if (rememberedName) { $("#loginBrand").textContent = rememberedName; $("#loginLogo").textContent = rememberedName[0]?.toUpperCase() || "G"; }
+
+const APP_VERSION="2.4 Stable";
+let installPrompt=null,searchTimer=null,searchSeq=0;
+function setSyncState(state,label){
+  S.syncState=state;
+  document.querySelectorAll(".sync-status").forEach(el=>{el.dataset.state=state;const t=el.querySelector("span");if(t)t.textContent=label||({loading:"Sincronizando…",saving:"Salvando…",synced:"Sincronizado",offline:"Sem conexão",error:"Erro de sincronização"}[state]||state)});
+}
+function syncOk(){setSyncState(navigator.onLine?"synced":"offline",navigator.onLine?"Sincronizado":"Sem conexão")}
+window.addEventListener("online",()=>{syncOk();toast("Conexão restaurada")});
+window.addEventListener("offline",()=>setSyncState("offline","Sem conexão"));
+window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();installPrompt=e});
+window.addEventListener("appinstalled",()=>{installPrompt=null;toast("Aplicativo instalado")});
+if("serviceWorker" in navigator) window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>{}));
 
 function toast(message, ms=1800){
   const el=$("#toast"); el.textContent=message; el.style.display="block";
@@ -78,9 +94,11 @@ function rate(name,v=3){
 function applyProfile(){
   const p=S.profile||{}, name=(p.app_name||"Greene").trim()||"Greene", initial=name[0]?.toUpperCase()||"G";
   $("#brandName").textContent=name; $("#brandLogo").textContent=initial; $("#loginBrand").textContent=name; $("#loginLogo").textContent=initial;
-  document.title=`${name} Monitor`; localStorage.setItem("greene-app-name",name);
+  document.title=`${name} Monitor · ${APP_VERSION}`; localStorage.setItem("greene-app-name",name);
   document.documentElement.dataset.accent=p.accent||"sage"; localStorage.setItem("greene-accent",p.accent||"sage");
+  document.documentElement.dataset.pack=p.theme_pack||"minimal"; localStorage.setItem("greene-theme-pack",p.theme_pack||"minimal");
 }
+
 async function fetchPaged(table, configure=(q)=>q, select="*"){
   const page=1000, out=[];
   for(let from=0; from<20000; from+=page){
@@ -151,18 +169,25 @@ async function ensureAutoGoalData(){
   const res=await Promise.all(defs.map(([t])=>fetchPaged(t,q=>q.gte("date",oldest).lte("date",today()).order("date",{ascending:false}))));res.forEach((rows,i)=>mergeRows(defs[i][1],rows||[]));
 }
 async function insertLocal(table,payload){
+  if(!navigator.onLine){setSyncState("offline","Sem conexão");toast("Sem conexão. O formulário foi mantido para você tentar novamente.",3200);return null}
+  setSyncState("saving");
   const {data,error}=await sb.from(table).insert({...payload,user_id:S.user.id}).select().single();
-  if(error){toast(error.message);return null;} const key=stateKey[table]; if(key)mergeRows(key,[data]); if(["daily_entries","sleep_entries","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries"].includes(table))scheduleGameSync(); toast("Salvo"); return data;
+  if(error){setSyncState("error");toast(error.message);return null;} const key=stateKey[table]; if(key)mergeRows(key,[data]); if(["daily_entries","sleep_entries","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries"].includes(table))scheduleGameSync(); syncOk(); toast("Salvo"); return data;
 }
 async function upsertDateLocal(table,payload){
+  if(!navigator.onLine){setSyncState("offline","Sem conexão");toast("Sem conexão. O formulário foi mantido para você tentar novamente.",3200);return null}
+  setSyncState("saving");
   const {data,error}=await sb.from(table).upsert({...payload,user_id:S.user.id},{onConflict:"user_id,date"}).select().single();
-  if(error){toast(error.message);return null;} const key=stateKey[table]; if(key)mergeRows(key,[data]); if(["daily_entries","sleep_entries","journal_entries"].includes(table))scheduleGameSync(); render(); toast("Salvo"); return data;
+  if(error){setSyncState("error");toast(error.message);return null;} const key=stateKey[table]; if(key)mergeRows(key,[data]); if(["daily_entries","sleep_entries","journal_entries"].includes(table))scheduleGameSync(); render(); syncOk(); toast("Salvo"); return data;
 }
 async function deleteLocal(table,id,ask=true){
   if(ask&&!confirm("Excluir este registro?")) return false;
-  const {error}=await sb.from(table).delete().eq("id",id); if(error){toast(error.message);return false;}
-  const key=stateKey[table]; if(key)S[key]=S[key].filter(x=>x.id!==id); if(["daily_entries","sleep_entries","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries"].includes(table))scheduleGameSync(); render(); return true;
+  if(!navigator.onLine){setSyncState("offline","Sem conexão");toast("A exclusão precisa de conexão.");return false}
+  setSyncState("saving");
+  const {error}=await sb.from(table).delete().eq("id",id); if(error){setSyncState("error");toast(error.message);return false;}
+  const key=stateKey[table]; if(key)S[key]=S[key].filter(x=>x.id!==id); if(["daily_entries","sleep_entries","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries"].includes(table))scheduleGameSync(); render(); syncOk(); return true;
 }
+
 function habitDone(hid,date){return S.habit_logs.some(x=>x.habit_id===hid&&x.date===date&&x.completed)}
 function habitStats(h){
   const logs=S.habit_logs.filter(x=>x.habit_id===h.id&&x.completed).map(x=>x.date).sort(), set=new Set(logs);
@@ -246,6 +271,62 @@ function avatarSvg(config=avatarConfig(),cls=""){
   if(c.accessory==="acc_star")acc=`<rect x="23" y="20" width="2" height="2" fill="#d5b45d"/><rect x="24" y="19" width="2" height="4" fill="#d5b45d"/><rect x="22" y="21" width="4" height="2" fill="#d5b45d"/>`;
   return `<span class="avatar-art ${cls}"><svg viewBox="0 0 32 32" shape-rendering="crispEdges" aria-label="Personagem pixel art"><ellipse cx="16" cy="30" rx="8" ry="1.4" fill="currentColor" opacity=".12"/><rect x="10" y="9" width="12" height="11" fill="${outline}"/><rect x="11" y="10" width="10" height="9" fill="${skin}"/><rect x="9" y="12" width="2" height="5" fill="${skin}"/><rect x="21" y="12" width="2" height="5" fill="${skin}"/>${hairShape(c.hair,hair,outline)}${eyes}<rect x="15" y="17" width="3" height="1" fill="#8b5b52"/>${torso}${outfitExtra}<rect x="10" y="29" width="5" height="2" fill="${outline}"/><rect x="18" y="29" width="5" height="2" fill="${outline}"/>${acc}</svg></span>`;
 }
+
+const roomDefaults={wall:"wall_cream",floor:"floor_oak",desk:"desk_simple",chair:"chair_simple",shelf:"shelf_small",plant:"plant_leaf",decor:"decor_lamp",pet:"none"};
+function roomConfig(){return {...roomDefaults,...(S.gameProfile?.room_config||{})}}
+function rarityLabel(r){return({common:"Comum",uncommon:"Incomum",rare:"Raro",epic:"Épico",legendary:"Lendário"}[r]||"Comum")}
+function categoryLabel(c){return({hair:"Cabelo",outfit:"Roupa",accessory:"Acessório",wall:"Parede",floor:"Piso",desk:"Mesa",chair:"Cadeira",shelf:"Estante",plant:"Planta",decor:"Decoração",pet:"Pet"}[c]||c)}
+function worldColor(key){
+  return ({wall_cream:"#ded7c7",wall_forest:"#73806a",wall_midnight:"#343946",wall_arcane:"#62506e",floor_oak:"#9b7454",floor_dark:"#5b463b",floor_stone:"#767674"}[key]||"#8a8a82");
+}
+function petSvg(key="none",cls=""){
+  if(key==="none")return"";
+  const common=`class="pet-art ${cls}" viewBox="0 0 24 18" shape-rendering="crispEdges"`;
+  if(key==="pet_cat")return `<svg ${common}><rect x="6" y="7" width="12" height="8" fill="#77736d"/><rect x="7" y="4" width="10" height="6" fill="#77736d"/><rect x="7" y="2" width="3" height="4" fill="#77736d"/><rect x="14" y="2" width="3" height="4" fill="#77736d"/><rect x="9" y="7" width="2" height="2" fill="#20211f"/><rect x="14" y="7" width="2" height="2" fill="#20211f"/><rect x="18" y="10" width="4" height="2" fill="#77736d"/><rect x="20" y="8" width="2" height="3" fill="#77736d"/></svg>`;
+  if(key==="pet_dog")return `<svg ${common}><rect x="5" y="7" width="14" height="8" fill="#b27b4d"/><rect x="7" y="3" width="10" height="7" fill="#b27b4d"/><rect x="4" y="4" width="4" height="6" fill="#7b5138"/><rect x="16" y="4" width="4" height="6" fill="#7b5138"/><rect x="9" y="6" width="2" height="2" fill="#222"/><rect x="14" y="6" width="2" height="2" fill="#222"/><rect x="11" y="9" width="3" height="2" fill="#463126"/></svg>`;
+  if(key==="pet_slime")return `<svg ${common}><rect x="5" y="8" width="14" height="7" fill="#6ba0a0"/><rect x="7" y="5" width="10" height="4" fill="#6ba0a0"/><rect x="8" y="8" width="2" height="2" fill="#173133"/><rect x="14" y="8" width="2" height="2" fill="#173133"/><rect x="10" y="12" width="4" height="1" fill="#356b6e"/></svg>`;
+  return `<svg ${common}><rect x="7" y="5" width="10" height="10" fill="#88775d"/><rect x="5" y="7" width="4" height="7" fill="#665847"/><rect x="15" y="7" width="4" height="7" fill="#665847"/><rect x="8" y="2" width="3" height="4" fill="#88775d"/><rect x="13" y="2" width="3" height="4" fill="#88775d"/><rect x="9" y="8" width="2" height="2" fill="#e5c96f"/><rect x="13" y="8" width="2" height="2" fill="#e5c96f"/></svg>`;
+}
+function roomBackgroundSvg(c=roomConfig()){
+  const wall=worldColor(c.wall),floor=worldColor(c.floor),night=c.wall==="wall_midnight",arcane=c.wall==="wall_arcane";
+  const shelf=c.shelf==="shelf_library"?`<rect x="16" y="42" width="66" height="79" fill="#5a3f30"/><rect x="20" y="47" width="58" height="69" fill="#7b5a42"/>${[58,78,98].map(y=>`<rect x="20" y="${y}" width="58" height="4" fill="#4d382d"/>`).join("")}<g>${Array.from({length:18},(_,i)=>{const x=23+(i%6)*9,y=49+Math.floor(i/6)*20,h=7+(i%3)*3;return `<rect x="${x}" y="${y}" width="5" height="${h}" fill="${['#9b6b58','#677b69','#6b6f8f','#a18655'][i%4]}"/>`}).join("")}</g>`:`<rect x="20" y="62" width="48" height="58" fill="#644a38"/><rect x="24" y="67" width="40" height="48" fill="#87654a"/><rect x="24" y="82" width="40" height="4" fill="#4d392e"/><rect x="24" y="101" width="40" height="4" fill="#4d392e"/>`;
+  const desk=c.desk==="desk_scholar"?`<rect x="183" y="106" width="87" height="9" fill="#5b3e31"/><rect x="190" y="114" width="7" height="42" fill="#493229"/><rect x="255" y="114" width="7" height="42" fill="#493229"/><rect x="207" y="94" width="32" height="12" fill="#d8d1bd"/><rect x="214" y="88" width="20" height="7" fill="#b59a62"/>`:c.desk==="desk_arcane"?`<rect x="180" y="105" width="92" height="10" fill="#493d58"/><rect x="188" y="114" width="7" height="42" fill="#3a3246"/><rect x="257" y="114" width="7" height="42" fill="#3a3246"/><rect x="211" y="92" width="28" height="13" fill="#75608c"/><rect x="220" y="86" width="10" height="6" fill="#c9a8ff"/>`:`<rect x="187" y="108" width="82" height="8" fill="#775640"/><rect x="193" y="115" width="6" height="40" fill="#5b4334"/><rect x="257" y="115" width="6" height="40" fill="#5b4334"/>`;
+  const chair=c.chair==="chair_cozy"?`<rect x="170" y="124" width="28" height="25" rx="2" fill="#7f665c"/><rect x="174" y="117" width="20" height="13" fill="#9b7e72"/><rect x="174" y="149" width="5" height="13" fill="#4d3b34"/><rect x="190" y="149" width="5" height="13" fill="#4d3b34"/>`:`<rect x="173" y="127" width="23" height="18" fill="#665044"/><rect x="178" y="115" width="13" height="16" fill="#806659"/><rect x="176" y="145" width="4" height="16" fill="#4b3c34"/><rect x="190" y="145" width="4" height="16" fill="#4b3c34"/>`;
+  const plant=c.plant==="plant_cactus"?`<rect x="280" y="117" width="13" height="13" fill="#7a5542"/><rect x="284" y="98" width="6" height="20" fill="#66835f"/><rect x="279" y="104" width="6" height="6" fill="#66835f"/><rect x="289" y="107" width="6" height="6" fill="#66835f"/>`:`<rect x="278" y="118" width="16" height="13" fill="#84614a"/><rect x="284" y="101" width="4" height="18" fill="#4e674b"/><rect x="277" y="99" width="10" height="7" fill="#6d8b68"/><rect x="286" y="96" width="10" height="8" fill="#5f7d5b"/><rect x="280" y="107" width="9" height="7" fill="#78936f"/>`;
+  let decor=c.decor==="decor_reader"?`<rect x="230" y="97" width="8" height="9" fill="#d5b45d"/><rect x="232" y="92" width="4" height="6" fill="#d5b45d"/>`:c.decor==="decor_star"?`<polygon points="233,91 236,97 243,98 238,103 239,109 233,106 227,109 228,103 223,98 230,97" fill="#d4af52"/>`:c.decor==="decor_journal"?`<rect x="229" y="97" width="13" height="9" fill="#774f60"/><rect x="235" y="88" width="2" height="11" fill="#ddd2bd"/><polygon points="236,88 242,83 238,92" fill="#ddd2bd"/>`:`<rect x="235" y="91" width="4" height="16" fill="#62564d"/><rect x="227" y="87" width="20" height="7" fill="#d2bd83"/>`;
+  const windowGlow=night?"#687aa5":arcane?"#b78ae0":"#aac4ce";
+  return `<svg viewBox="0 0 320 180" shape-rendering="crispEdges" aria-label="Base pixel art"><rect width="320" height="128" fill="${wall}"/><rect y="128" width="320" height="52" fill="${floor}"/><rect y="124" width="320" height="5" fill="#493f38" opacity=".5"/><rect x="115" y="23" width="72" height="53" fill="#4d453f"/><rect x="120" y="28" width="62" height="43" fill="${windowGlow}"/><rect x="149" y="28" width="5" height="43" fill="#4d453f"/><rect x="120" y="48" width="62" height="5" fill="#4d453f"/>${night?`<rect x="132" y="35" width="3" height="3" fill="#f3e6a3"/><rect x="165" y="42" width="2" height="2" fill="#f3e6a3"/>`:``}${arcane?`<circle cx="150" cy="43" r="10" fill="#d5b4ff" opacity=".4"/>`:``}${shelf}${desk}${chair}${plant}${decor}</svg>`;
+}
+function activityScene(){
+  const q=dataOf(today());
+  if(q.st.length)return{key:"study",label:"Estudando",icon:"✎"};
+  if(q.r.length)return{key:"reading",label:"Lendo",icon:"▥"};
+  if(q.j)return{key:"writing",label:"Escrevendo",icon:"▤"};
+  if(q.e.length)return{key:"resting",label:"Descansando",icon:"☕"};
+  return{key:"idle",label:"Em casa",icon:"✦"};
+}
+function roomScene(cls=""){
+  const c=roomConfig(),a=activityScene();
+  return `<div class="room-scene ${cls} activity-${a.key}">${roomBackgroundSvg(c)}<div class="room-character">${avatarSvg(avatarConfig(),"room-avatar")}<span class="activity-bubble">${a.icon} ${a.label}</span></div><div class="room-pet">${petSvg(c.pet,"room-pet-art")}</div></div>`;
+}
+function worldItemButton(item,selected){
+  const available=canUseItem(item.item_key),rar=item.rarity||"common";
+  return `<button type="button" class="world-option rarity-${rar} ${selected===item.item_key?"selected":""} ${available?"":"locked"}" data-room-item="${item.item_key}" data-room-category="${item.category}" ${available?"":'data-locked="true"'}><span class="world-option-icon">${({wall:"▧",floor:"▰",desk:"▱",chair:"▣",shelf:"▥",plant:"♧",decor:"✦",pet:"●"}[item.category]||"◇")}</span><b>${esc(item.name)}</b><small>${available?rarityLabel(rar):unlockText(item)}</small></button>`;
+}
+function worldView(){
+  const c=roomConfig(),cats=["wall","floor","desk","chair","shelf","plant","decor","pet"];
+  return `<div class="world-grid"><div class="panel world-showcase"><div class="world-title"><div><small>SUA BASE</small><h2>${esc(S.gameProfile?.character_name||"Aventureiro")}</h2></div><span class="rarity-badge">${activityScene().label}</span></div>${roomScene("world-large")}<div class="world-stats"><span>Lv. ${S.gameProfile?.level||1}</span><span>🪙 ${S.gameProfile?.coins||0}</span><span>${S.gameAchievements.length} conquistas</span></div></div><div class="panel world-controls"><h3>Personalizar base</h3><p class="muted">Escolha os itens disponíveis. A base salva por slots para permanecer simples e estável.</p>${cats.map(cat=>`<div class="world-section"><div class="world-section-head"><b>${categoryLabel(cat)}</b><small>${cat==="pet"&&c.pet==="none"?"Nenhum":esc(gameItem(c[cat])?.name||c[cat]||"")}</small></div><div class="world-options">${cat==="pet"?`<button type="button" class="world-option ${c.pet==="none"?"selected":""}" data-room-item="none" data-room-category="pet"><span class="world-option-icon">○</span><b>Nenhum</b><small>Disponível</small></button>`:""}${S.gameItems.filter(i=>i.category===cat).map(i=>worldItemButton(i,c[cat])).join("")}</div></div>`).join("")}<div class="actions"><button data-save-room>Salvar base</button></div></div></div>`;
+}
+function itemPreview(item){
+  if(["hair","outfit","accessory"].includes(item.category)){const prop=item.category==="hair"?"hair":item.category==="outfit"?"outfit":"accessory";return avatarSvg({...avatarConfig(),[prop]:item.item_key},"shop-avatar")}
+  if(item.category==="pet")return `<span class="shop-world-preview pet-preview">${petSvg(item.item_key)}</span>`;
+  return `<span class="shop-world-preview"><span class="world-glyph">${({wall:"▧",floor:"▰",desk:"▱",chair:"▣",shelf:"▥",plant:"♧",decor:"✦"}[item.category]||"◇")}</span></span>`;
+}
+function inventoryView(){
+  const items=S.gameItems,unlocked=items.filter(i=>canUseItem(i.item_key));
+  return `<div class="panel collection-head"><div><small>COLEÇÃO</small><div class="metric">${unlocked.length}/${items.length}</div><p class="muted">Cosméticos, móveis, decorações e companheiros desbloqueados pelo seu histórico.</p></div><div class="collection-ring" style="--pct:${items.length?Math.round(unlocked.length/items.length*100):0}%"><b>${items.length?Math.round(unlocked.length/items.length*100):0}%</b></div></div><div class="inventory-grid">${items.map(i=>{const got=canUseItem(i.item_key);return `<div class="panel inventory-item ${got?"":"locked"} rarity-${i.rarity||"common"}">${itemPreview(i)}<div><span class="rarity-label">${rarityLabel(i.rarity)}</span><h3>${got?esc(i.name):"???"}</h3><small>${categoryLabel(i.category)} · ${got?unlockText(i):"Bloqueado"}</small></div></div>`}).join("")}</div>`;
+}
+
 async function loadGameData(){
   const [inv,ach,q,qp,items,defs,ap,stats]=await Promise.all([
     sb.from("game_inventory").select("*").order("unlocked_at",{ascending:false}),
@@ -343,10 +424,11 @@ function currentNotePayload(){
   const f=document.querySelector('form[data-form="note"]');if(!f)return null;const x=Object.fromEntries(new FormData(f));x.tags=x.tags?x.tags.split(",").map(s=>s.trim()).filter(Boolean):[];x.folder_id=x.folder_id||null;return{id:f.dataset.id,payload:x};
 }
 async function persistNote(id,payload,{quiet=false}={}){
-  const seq=++noteSaveSeq;setSaveState("Salvando…");const updated_at=new Date().toISOString();
+  if(!navigator.onLine){setSaveState("Offline");setSyncState("offline","Sem conexão");if(!quiet)toast("Sem conexão. O texto permanece no editor.");return false}
+  const seq=++noteSaveSeq;setSaveState("Salvando…");setSyncState("saving");const updated_at=new Date().toISOString();
   const {data,error}=await sb.from("notes").update({...payload,updated_at}).eq("id",id).select("id,title,tags,is_favorite,folder_id,note_type,linked_date,created_at,updated_at,content").single();
-  if(error){setSaveState("Erro");if(!quiet)toast(error.message);return false}
-  const i=S.notes.findIndex(n=>n.id===id);if(i>=0)S.notes[i]={...S.notes[i],...data,content:undefined};S.noteContent[id]=data.content||"";S.notes.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));if(seq===noteSaveSeq)setSaveState("Salvo");if(!quiet)toast("Nota salva");return true;
+  if(error){setSaveState("Erro");setSyncState("error");if(!quiet)toast(error.message);return false}
+  const i=S.notes.findIndex(n=>n.id===id);if(i>=0)S.notes[i]={...S.notes[i],...data,content:undefined};S.noteContent[id]=data.content||"";S.notes.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));if(seq===noteSaveSeq)setSaveState("Salvo");syncOk();if(!quiet)toast("Nota salva");return true;
 }
 function scheduleNoteSave(){clearTimeout(noteSaveTimer);setSaveState("Alterações…");noteSaveTimer=setTimeout(async()=>{const x=currentNotePayload();if(x)await persistNote(x.id,x.payload,{quiet:true})},650)}
 async function flushNoteSave(){if(!noteSaveTimer)return;clearTimeout(noteSaveTimer);noteSaveTimer=null;const x=currentNotePayload();if(x)await persistNote(x.id,x.payload,{quiet:true})}
@@ -369,6 +451,12 @@ function summaryFor(start,end){
   const daily=periodRows(S.daily,start,end),sleep=periodRows(S.sleep,start,end),reads=periodRows(S.reading_logs,start,end),studies=periodRows(S.studies,start,end),ex=periodRows(S.exercise_logs,start,end),hab=periodRows(S.habit_logs,start,end).filter(x=>x.completed);
   return {days:daily.length,sleep:avg(sleep.map(hours)),mood:avg(daily.map(x=>x.mood)),energy:avg(daily.map(x=>x.energy)),focus:avg(daily.map(x=>x.focus)),pages:reads.reduce((a,x)=>a+(+x.pages_read||0),0),study:studies.reduce((a,x)=>a+(+x.minutes||0),0),exercise:ex.reduce((a,x)=>a+(+x.minutes||0),0),habits:hab.length};
 }
+function rpgDashboardCard(g){
+  if(S.profile?.gamification_enabled===false)return"";
+  const xi=xpInfo(),compact=S.profile?.rpg_display_mode==="compact";
+  if(compact)return `<button class="panel dash-card hoverable rpg-dashboard-card compact" data-open-rpg>${avatarSvg(avatarConfig(),"rpg-mini")}<div><small>${esc(g.title||rankName(xi.level))}</small><div class="submetric"><b>Lv. ${xi.level}</b><span> · 🪙 ${g.coins||0}</span></div><div class="xp-line"><span style="width:${xi.pct}%"></span></div></div></button>`;
+  return `<button class="panel dash-card hoverable rpg-dashboard-card rpg-world-card" data-open-rpg><div class="rpg-world-mini">${roomScene("dashboard-room")}<div><small>${esc(g.title||rankName(xi.level))}</small><div class="metric">Lv. ${xi.level}</div><div class="submetric"><span>${esc(g.character_name||"Aventureiro")}</span><span>·</span><span>🪙 ${g.coins||0}</span></div><div class="xp-line"><span style="width:${xi.pct}%"></span></div><small>${xi.inside}/${xi.needed} XP para o próximo nível</small></div></div></button>`;
+}
 function dashboardCards(){
   const cards=Array.isArray(S.profile?.dashboard_cards)?S.profile.dashboard_cards:defaultCards,week=summaryFor(startOfWeek(),today()),month=summaryFor(startOfMonth(),today()),hs=S.habits.filter(x=>x.active),g=S.gameProfile||{};
   const map={
@@ -378,7 +466,7 @@ function dashboardCards(){
     reading:()=>`<div class="panel dash-card hoverable"><small>Leitura · mês</small><div class="metric">${month.pages} pág.</div><div class="submetric"><span>${S.books.filter(b=>b.status==="Em andamento").length} em andamento</span></div></div>`,
     study:()=>`<div class="panel dash-card hoverable"><small>Estudos · mês</small><div class="metric">${Math.floor(month.study/60)}h ${month.study%60}m</div><div class="submetric"><span>${periodRows(S.studies,startOfMonth(),today()).length} sessões</span></div></div>`,
     goals:()=>`<div class="panel dash-card hoverable"><small>Objetivos</small><div class="metric">${S.goals.filter(x=>(x.status||"Ativo")!=="Concluído").length}</div><div class="submetric"><span>ativos</span></div></div>`,
-    rpg:()=>S.profile?.gamification_enabled?(()=>{const xi=xpInfo();return `<button class="panel dash-card hoverable rpg-dashboard-card" data-open-rpg><div class="rpg-preview">${avatarSvg(avatarConfig(),"rpg-mini")}<div><small>${esc(g.title||rankName(xi.level))}</small><div class="metric">Lv. ${xi.level}</div><div class="submetric"><span>${esc(g.character_name||"Aventureiro")}</span><span>·</span><span>🪙 ${g.coins||0}</span></div><div class="xp-line"><span style="width:${xi.pct}%"></span></div><small>${xi.inside}/${xi.needed} XP para o próximo nível</small></div></div></button>`})():""
+    rpg:()=>rpgDashboardCard(g)
   };
   return cards.map(k=>map[k]?.()||"").join("");
 }
@@ -399,6 +487,49 @@ function calendarPage(){
   for(let n=1;n<=last.getDate();n++){const ds=`${y}-${String(m+1).padStart(2,"0")}-${String(n).padStart(2,"0")}`,q=dataOf(ds),count=[q.d,q.s,q.h.length,q.r.length,q.st.length,q.e.length,q.j].filter(Boolean).length;cells.push(`<button class="day ${ds===today()?"today":""} ${ds===S.selected?"selected":""}" data-date="${ds}"><b>${n}</b><div class="dots">${"<i class='dot'></i>".repeat(Math.min(count,6))}</div></button>`)}
   return `<div class="panel"><div class="row" style="border:0;padding:0 0 14px"><button class="secondary" data-month="-1">←</button><h3>${b.toLocaleDateString("pt-BR",{month:"long",year:"numeric"})}</h3><button class="secondary" data-month="1">→</button></div><div class="calendar">${["D","S","T","Q","Q","S","S"].map(x=>`<div class="weekday">${x}</div>`).join("")}${cells.join("")}</div></div>`;
 }
+async function loadRangeData(start,end){
+  setSyncState("loading","Carregando histórico…");
+  const defs=[["daily_entries","daily"],["sleep_entries","sleep"],["habit_logs","habit_logs"],["studies","studies"],["reading_logs","reading_logs"],["exercise_logs","exercise_logs"],["journal_entries","journal_entries"]];
+  try{const res=await Promise.all(defs.map(([t])=>fetchPaged(t,q=>q.gte("date",start).lte("date",end).order("date",{ascending:false}))));res.forEach((rows,i)=>mergeRows(defs[i][1],rows||[]));syncOk();return res.reduce((n,r)=>n+(r?.length||0),0)}catch(err){setSyncState("error");toast("Não foi possível carregar o histórico: "+err.message,3500);return 0}
+}
+async function loadOlderHistory(){
+  const dated=[...S.daily,...S.sleep,...S.habit_logs,...S.studies,...S.reading_logs,...S.exercise_logs,...S.journal_entries].map(x=>x.date).filter(Boolean).sort();
+  const end=addDays(dated[0]||addDays(today(),-179),-1),start=addDays(end,-179),count=await loadRangeData(start,end);S.timelineCanLoadMore=count>0;S.timelineVisibleDays+=180;render();if(!count)toast("Todo o histórico disponível já foi carregado")
+}
+function timelineGroups(){
+  const m=new Map(),add=(date,icon,title,detail="",view="today")=>{if(!date)return;if(!m.has(date))m.set(date,[]);m.get(date).push({icon,title,detail,view})};
+  S.daily.forEach(x=>add(x.date,"●","Check-in",`Energia ${x.energy}/5 · Humor ${x.mood}/5 · Foco ${x.focus}/5`));
+  S.sleep.forEach(x=>add(x.date,"☾","Sono",`${fmt1(hours(x))}h · qualidade ${x.quality}/5`));
+  const hg={};S.habit_logs.filter(x=>x.completed).forEach(x=>(hg[x.date]??=[]).push(S.habits.find(h=>h.id===x.habit_id)?.name||"Hábito"));Object.entries(hg).forEach(([d,n])=>add(d,"✓",`${n.length} hábito${n.length===1?"":"s"}`,n.slice(0,4).join(" · "),"habits"));
+  S.reading_logs.forEach(x=>add(x.date,"▥",S.books.find(b=>b.id===x.book_id)?.title||"Leitura",`${x.pages_read} páginas${x.minutes?` · ${x.minutes} min`:""}`,"books"));
+  S.studies.forEach(x=>add(x.date,"◷",x.subject,`${x.minutes} min de estudo`,"studies"));
+  S.exercise_logs.forEach(x=>add(x.date,"◇",x.activity,`${x.minutes||0} min de exercício`));
+  S.journal_entries.forEach(x=>add(x.date,"▤",x.title||"Diário",(x.body||"").slice(0,100)));
+  S.books.filter(x=>x.finished_on).forEach(x=>add(x.finished_on,"★",`Livro concluído: ${x.title}`,x.author||"","books"));
+  S.gameAchievements.forEach(a=>{const d=a.unlocked_at?.slice(0,10),def=S.achievementDefs.find(x=>x.achievement_key===a.achievement_key);add(d,"🏆",def?.name||"Conquista desbloqueada",def?.title?`Título: ${def.title}`:"","rpg")});
+  return [...m.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+}
+function timelinePage(){
+  const groups=timelineGroups(),cut=addDays(today(),-(S.timelineVisibleDays-1)),visible=groups.filter(([d])=>d>=cut);
+  return `<div class="panel timeline-intro"><div><h3>Sua linha do tempo</h3><p class="muted">Uma visão contínua dos registros, marcos e conquistas. Os dados originais continuam em seus módulos.</p></div><span class="chip">${visible.length} dias com atividade</span></div><div class="timeline">${visible.map(([date,items])=>`<section class="timeline-day"><div class="timeline-date"><b>${toDate(date).toLocaleDateString("pt-BR",{day:"2-digit",month:"short"})}</b><small>${toDate(date).toLocaleDateString("pt-BR",{weekday:"long",year:"numeric"})}</small></div><div class="timeline-events">${items.map(i=>`<button class="timeline-event" data-timeline-view="${i.view}" data-timeline-date="${date}"><span class="timeline-icon">${i.icon}</span><span><strong>${esc(i.title)}</strong>${i.detail?`<small>${esc(i.detail)}</small>`:""}</span></button>`).join("")}</div></section>`).join("")||`<div class="empty-state">Ainda não há registros para mostrar.</div>`}</div>${S.timelineCanLoadMore?`<div class="actions" style="justify-content:center"><button class="secondary" data-load-older>Carregar histórico anterior</button></div>`:""}`;
+}
+function previousRange(start,end){const len=daysBetween(start,end),pe=addDays(start,-1),ps=addDays(pe,-(len-1));return[ps,pe]}
+function compareValue(cur,prev,unit=""){
+  if(cur==null)return"—";if(prev==null)return`${fmt1(cur)}${unit}`;const d=cur-prev,sign=d>0?"+":"";return `${fmt1(cur)}${unit} <span class="retro-delta ${d>0?"up":d<0?"down":""}">${sign}${fmt1(d)}${unit}</span>`;
+}
+async function ensureRetrospectiveData(){
+  if(S.retrospectiveYearLoaded)return;const y=new Date().getFullYear(),start=`${y}-01-01`;await loadRangeData(start,today());S.retrospectiveYearLoaded=true;
+}
+function retrospectiveBlock(title,start,end){
+  const [ps,pe]=previousRange(start,end),c=summaryFor(start,end),p=summaryFor(ps,pe);
+  const rows=[["Sono médio",c.sleep,p.sleep,"h"],["Páginas",c.pages,p.pages,""],["Estudo",c.study,p.study," min"],["Hábitos",c.habits,p.habits,""],["Exercício",c.exercise,p.exercise," min"],["Humor",c.mood,p.mood,"/5"]];
+  return `<div class="panel retro-card"><div class="retro-head"><div><small>${start} → ${end}</small><h3>${title}</h3></div><span class="chip">vs. período anterior</span></div><div class="retro-grid">${rows.map(([n,a,b,u])=>`<div><small>${n}</small><b>${a==null?"—":typeof a==="number"?fmt1(a)+u:a}</b><span>${b==null?"sem comparação":(()=>{const d=(+a||0)-(+b||0);return`${d>0?"↑":d<0?"↓":"→"} ${Math.abs(d).toFixed(1)}${u}`})()}</span></div>`).join("")}</div></div>`;
+}
+function retrospectivePage(){
+  const wStart=startOfWeek(),mStart=startOfMonth(),y=new Date().getFullYear(),year=summaryFor(`${y}-01-01`,today()),books=S.books.filter(b=>b.finished_on&&b.finished_on>=`${y}-01-01`&&b.finished_on<=today()).length,exerciseSessions=S.exercise_logs.filter(x=>x.date>=`${y}-01-01`).length;
+  return `<div class="retro-hero panel"><div><small>RETROSPECTIVA</small><h2>Seu progresso em contexto</h2><p class="muted">Comparações descrevem o que foi registrado. Elas não afirmam que uma atividade causou outra.</p></div><span class="version-pill">${APP_VERSION}</span></div><div class="grid two">${retrospectiveBlock("Esta semana",wStart,today())}${retrospectiveBlock("Este mês",mStart,today())}</div><h2 class="section">${y} em números</h2><div class="grid four">${[["Dias registrados",year.days],["Páginas lidas",year.pages],["Estudo",`${Math.floor(year.study/60)}h ${year.study%60}m`],["Hábitos concluídos",year.habits],["Exercício",`${year.exercise} min`],["Sessões de exercício",exerciseSessions],["Livros concluídos",books],["Sono médio",year.sleep==null?"—":fmt1(year.sleep)+"h"]].map(x=>`<div class="panel hoverable"><small>${x[0]}</small><div class="metric">${x[1]}</div></div>`).join("")}</div><h2 class="section">Leitura rápida</h2><div class="panel retro-notes">${(()=>{const w=summaryFor(wStart,today()),[pws,pwe]=previousRange(wStart,today()),pw=summaryFor(pws,pwe),m=summaryFor(mStart,today()),[pms,pme]=previousRange(mStart,today()),pm=summaryFor(pms,pme);const facts=[];if(w.pages||pw.pages)facts.push(`Você leu ${w.pages} páginas nesta semana, ${w.pages>=pw.pages?"acima ou igual":"abaixo"} às ${pw.pages} do período anterior.`);if(w.study||pw.study)facts.push(`Foram ${w.study} minutos de estudo nesta semana versus ${pw.study} no período comparável anterior.`);if(m.habits||pm.habits)facts.push(`Neste mês há ${m.habits} conclusões de hábitos registradas; no período comparável anterior, ${pm.habits}.`);if(m.sleep!=null&&pm.sleep!=null)facts.push(`O sono médio registrado no mês é ${fmt1(m.sleep)}h, comparado a ${fmt1(pm.sleep)}h no período anterior.`);return facts.map(f=>`<p>${esc(f)}</p>`).join("")||`<p class="muted">Continue registrando para construir comparações mais úteis.</p>`})()}</div>`;
+}
+
 function habitCalendar(h){
   const b=toDate(S.selected),y=b.getFullYear(),m=b.getMonth(),first=new Date(y,m,1),last=new Date(y,m+1,0),cells=[];
   for(let i=0;i<first.getDay();i++)cells.push("<span class='habit-day empty'></span>");
@@ -533,47 +664,58 @@ function achievementsView(){
 }
 function shopView(){
   const coins=Number(S.gameProfile?.coins||0),items=S.gameItems.filter(x=>x.unlock_type==="coins");
-  return `<div class="shop-head panel"><div><small>SALDO</small><div class="metric">🪙 ${coins}</div></div><p class="muted">Moedas são ganhas por progresso e quests. Os itens são apenas cosméticos.</p></div><div class="shop-grid">${items.map(i=>{const owned=inventorySet().has(i.item_key),ok=coins>=i.price;return `<div class="panel shop-item">${avatarSvg({...avatarConfig(),[i.category==="hair"?"hair":i.category==="outfit"?"outfit":"accessory"]:i.item_key},"shop-avatar")}<div><h3>${esc(i.name)}</h3><p class="muted">${esc(i.description||"")}</p><b>🪙 ${i.price}</b></div><button ${owned||!ok?"disabled":""} data-buy-item="${i.item_key}">${owned?"Adquirido":ok?"Comprar":"Moedas insuficientes"}</button></div>`}).join("")||`<div class="empty-state">Nenhum item à venda no momento.</div>`}</div>`;
+  return `<div class="shop-head panel"><div><small>SALDO</small><div class="metric">🪙 ${coins}</div></div><p class="muted">Moedas são conquistadas por progresso e quests. Tudo aqui é cosmético e não altera suas métricas.</p></div><div class="shop-grid">${items.map(i=>{const owned=inventorySet().has(i.item_key),ok=coins>=i.price;return `<div class="panel shop-item rarity-${i.rarity||"common"}">${itemPreview(i)}<div><span class="rarity-label">${rarityLabel(i.rarity)}</span><h3>${esc(i.name)}</h3><p class="muted">${esc(i.description||"")}</p><b>🪙 ${i.price}</b></div><button ${owned||!ok?"disabled":""} data-buy-item="${i.item_key}">${owned?"Adquirido":ok?"Comprar":"Moedas insuficientes"}</button></div>`}).join("")||`<div class="empty-state">Nenhum item à venda no momento.</div>`}</div>`;
 }
 function rpgOverview(){
   const g=S.gameProfile||{},xi=xpInfo(),attrs=gameAttributes(),activeQuests=S.gameQuests.filter(q=>q.starts_on<=today()&&q.ends_on>=today()),done=activeQuests.filter(q=>q.completed).length;
-  return `<div class="rpg-hero panel"><div class="avatar-stage">${avatarSvg(avatarConfig(),"hero-avatar")}</div><div class="rpg-hero-copy"><small>${esc(g.title||rankName(xi.level))}</small><h2>${esc(g.character_name||"Aventureiro")}</h2><div class="level-row"><strong>Nível ${xi.level}</strong><span>🪙 ${g.coins||0}</span></div><div class="xp-line big"><span style="width:${xi.pct}%"></span></div><small>${xi.inside}/${xi.needed} XP para o nível ${xi.level+1} · ${xi.xp} XP total</small><p class="muted">Seu personagem evolui com atividades registradas. Humor, sono ruim ou dias difíceis nunca removem XP.</p></div></div>
-  <div class="grid three rpg-summary"><div class="panel"><small>Classe atual</small><div class="metric">${rankName(xi.level)}</div></div><div class="panel"><small>Quests atuais</small><div class="metric">${done}/${activeQuests.length}</div></div><div class="panel"><small>Conquistas</small><div class="metric">${S.gameAchievements.length}/${S.achievementDefs.length}</div></div></div>
+  return `<div class="rpg-hero panel"><div class="avatar-stage">${avatarSvg(avatarConfig(),"hero-avatar")}</div><div class="rpg-hero-copy"><small>${esc(g.title||rankName(xi.level))}</small><h2>${esc(g.character_name||"Aventureiro")}</h2><div class="level-row"><strong>Nível ${xi.level}</strong><span>🪙 ${g.coins||0}</span></div><div class="xp-line big"><span style="width:${xi.pct}%"></span></div><small>${xi.inside}/${xi.needed} XP para o nível ${xi.level+1} · ${xi.xp} XP total</small><p class="muted">Seu personagem representa o histórico que você construiu. Humor, sono ruim ou dias difíceis nunca removem XP.</p><div class="actions" style="justify-content:flex-start"><button class="secondary" data-rpg-tab="world">Abrir minha base</button></div></div></div>
+  <div class="grid three rpg-summary"><div class="panel"><small>Classe atual</small><div class="metric">${rankName(xi.level)}</div></div><div class="panel"><small>Quests atuais</small><div class="metric">${done}/${activeQuests.length}</div></div><div class="panel"><small>Coleção</small><div class="metric">${S.gameItems.filter(i=>canUseItem(i.item_key)).length}/${S.gameItems.length}</div></div></div>
+  <h2 class="section">Sua base</h2><button class="panel world-dashboard-card" data-rpg-tab="world">${roomScene("world-dashboard")}<span><b>Entrar na base</b><small>Personalize o quarto, pet, móveis e troféus.</small></span></button>
   <h2 class="section">Atributos</h2><div class="attribute-grid">${attrs.map(([n,l,d])=>`<div class="panel attribute-card"><span>${esc(n)}</span><b>Lv. ${l}</b><small>${esc(d)}</small></div>`).join("")}</div>
   <h2 class="section">Próximas quests</h2>${questsView()}`;
 }
 function rpgPage(){
-  if(S.profile?.gamification_enabled===false)return `<div class="panel empty-state"><h2>Gamificação desativada</h2><p>Se quiser usar personagem, XP e quests, ative a gamificação em Configurações.</p><button data-enable-game>Ativar gamificação</button></div>`;
-  const tabs=[["overview","Visão geral"],["creator","Personagem"],["quests","Quests"],["achievements","Conquistas"],["shop","Loja"]];
-  const body={overview:rpgOverview,creator:avatarCreator,quests:questsView,achievements:achievementsView,shop:shopView}[S.rpgTab]();
+  if(S.profile?.gamification_enabled===false)return `<div class="panel empty-state"><h2>Gamificação desativada</h2><p>O monitor continua funcionando normalmente. Ative a gamificação quando quiser usar personagem, base, XP e quests.</p><button data-enable-game>Ativar gamificação</button></div>`;
+  const tabs=[["overview","Visão geral"],["world","Mundo"],["creator","Personagem"],["quests","Quests"],["achievements","Conquistas"],["inventory","Coleção"],["shop","Loja"]];
+  const body={overview:rpgOverview,world:worldView,creator:avatarCreator,quests:questsView,achievements:achievementsView,inventory:inventoryView,shop:shopView}[S.rpgTab]?.()||rpgOverview();
   return `<div class="rpg-tabs">${tabs.map(([k,n])=>`<button class="secondary ${S.rpgTab===k?"active":""}" data-rpg-tab="${k}">${n}</button>`).join("")}</div>${body}`;
 }
 
 const cardLabels={week:"Resumo semanal",sleep:"Sono",habits:"Hábitos",reading:"Leitura",study:"Estudos",goals:"Objetivos",rpg:"Personagem RPG"};
 function settingsPage(){
   const p=S.profile||{},g=S.gameProfile||{},cards=Array.isArray(p.dashboard_cards)?p.dashboard_cards:defaultCards,ordered=[...cards,...defaultCards.filter(k=>!cards.includes(k))];
-  return `<div class="settings-grid"><div><div class="panel setting-section"><h3>Identidade e personalização</h3><form data-form="profile"><div class="form"><div class="field"><label>Nome do seu espaço</label><input name="app_name" maxlength="40" value="${esc(p.app_name||"Greene")}" required><small>Substitui “Greene” na interface.</small></div><div class="field"><label>Seu nome / apelido</label><input name="display_name" value="${esc(p.display_name||"")}"></div><div class="field"><label>Cor de destaque</label><select name="accent"><option value="sage" ${p.accent==="sage"?"selected":""}>Sage</option><option value="blue" ${p.accent==="blue"?"selected":""}>Blue</option><option value="violet" ${p.accent==="violet"?"selected":""}>Violet</option><option value="amber" ${p.accent==="amber"?"selected":""}>Amber</option><option value="rose" ${p.accent==="rose"?"selected":""}>Rose</option></select></div><div class="field"><label>Gamificação</label><select name="gamification_enabled"><option value="true" ${p.gamification_enabled!==false?"selected":""}>Ativada</option><option value="false" ${p.gamification_enabled===false?"selected":""}>Desativada</option></select></div></div><div class="actions"><button>Salvar personalização</button></div></form></div>
+  const standalone=window.matchMedia?.("(display-mode: standalone)")?.matches||navigator.standalone===true;
+  return `<div class="settings-grid"><div><div class="panel setting-section"><h3>Identidade e aparência</h3><form data-form="profile"><div class="form"><div class="field"><label>Nome do seu espaço</label><input name="app_name" maxlength="40" value="${esc(p.app_name||"Greene")}" required><small>Substitui “Greene” na interface.</small></div><div class="field"><label>Seu nome / apelido</label><input name="display_name" value="${esc(p.display_name||"")}"></div><div class="field"><label>Tema completo</label><select name="theme_pack">${[["minimal","Minimal"],["forest","Forest"],["midnight","Midnight"],["paper","Paper"],["arcane","Arcane"],["cyber","Cyber"]].map(([v,n])=>`<option value="${v}" ${p.theme_pack===v?"selected":""}>${n}</option>`).join("")}</select></div><div class="field"><label>Cor de destaque</label><select name="accent"><option value="sage" ${p.accent==="sage"?"selected":""}>Sage</option><option value="blue" ${p.accent==="blue"?"selected":""}>Blue</option><option value="violet" ${p.accent==="violet"?"selected":""}>Violet</option><option value="amber" ${p.accent==="amber"?"selected":""}>Amber</option><option value="rose" ${p.accent==="rose"?"selected":""}>Rose</option></select></div><div class="field"><label>Gamificação</label><select name="gamification_enabled"><option value="true" ${p.gamification_enabled!==false?"selected":""}>Ativada</option><option value="false" ${p.gamification_enabled===false?"selected":""}>Desativada</option></select></div><div class="field"><label>Presença do RPG</label><select name="rpg_display_mode"><option value="full" ${p.rpg_display_mode!=="compact"?"selected":""}>Completa</option><option value="compact" ${p.rpg_display_mode==="compact"?"selected":""}>Compacta</option></select><small>No modo compacto, o RPG ocupa menos espaço no dashboard.</small></div></div><div class="actions"><button>Salvar personalização</button></div></form></div>
   <div class="panel setting-section"><h3>Dashboard</h3><p class="muted">Escolha os cards e ajuste a ordem.</p><div class="dashboard-config">${ordered.map(k=>{const idx=cards.indexOf(k),on=idx>=0;return `<div class="dash-config-row"><input type="checkbox" data-card-toggle="${k}" ${on?"checked":""}><span>${cardLabels[k]}</span><button class="secondary" data-card-up="${k}" ${!on||idx<=0?"disabled":""}>↑</button><button class="secondary" data-card-down="${k}" ${!on||idx===cards.length-1?"disabled":""}>↓</button></div>`}).join("")}</div></div>
-  <div class="panel setting-section"><h3>Conta e segurança</h3><form data-form="password"><div class="field"><label>Nova senha</label><input type="password" name="password" minlength="8" placeholder="Mínimo de 8 caracteres" required></div><div class="actions"><button>Alterar senha</button></div></form><div class="actions" style="justify-content:flex-start"><button class="secondary" data-send-reset>Enviar e-mail de redefinição</button></div></div>
+  <div class="panel setting-section"><h3>Conta e segurança</h3><form data-form="password"><div class="field"><label>Nova senha</label><input type="password" name="password" minlength="8" placeholder="Mínimo de 8 caracteres" required></div><div class="actions"><button>Alterar senha</button></div></form><div class="actions" style="justify-content:flex-start"><button class="secondary" data-send-reset>Enviar e-mail de redefinição</button><button class="secondary" data-go="privacy">Privacidade e dados</button></div></div>
   <div class="panel setting-section danger-zone"><h3>Zona de perigo</h3><p class="muted">A exclusão remove a conta e os dados vinculados. Faça um backup antes.</p><button class="danger" data-delete-account>Excluir minha conta</button></div></div>
-  <div><div class="panel setting-section"><h3>Personagem RPG</h3><div class="avatar-settings">${avatarSvg(avatarConfig(),"settings-avatar")}<div><strong>${esc(g.character_name||p.display_name||"Aventureiro")}</strong><p class="muted">${esc(g.title||rankName(g.level||1))} · Nível ${g.level||1} · 🪙 ${g.coins||0}</p><button data-open-rpg> abrir criador de personagem</button></div></div><p class="muted">O criador inclui apresentação feminina, masculina e neutra, roupas, cabelos, acessórios e desbloqueios por progresso.</p></div>
-  <div class="panel setting-section"><h3>Backup e portabilidade</h3><p class="muted">O backup completo exporta os dados das tabelas em JSON. Arquivos anexados continuam no Storage e aparecem no backup como metadados/caminhos.</p><button data-full-export>Gerar backup completo</button></div>
-  <div class="panel setting-section"><h3>Notas</h3><p class="muted">Pastas, Inbox, templates, nota diária, Markdown, backlinks, relações e anexos estão ativos. O carregamento é paginado para manter a interface rápida.</p></div></div></div>`;
+  <div><div class="panel setting-section"><h3>Personagem & mundo</h3><div class="avatar-settings">${avatarSvg(avatarConfig(),"settings-avatar")}<div><strong>${esc(g.character_name||p.display_name||"Aventureiro")}</strong><p class="muted">${esc(g.title||rankName(g.level||1))} · Nível ${g.level||1} · 🪙 ${g.coins||0}</p><button data-open-rpg>Abrir RPG</button></div></div><p class="muted">Avatar, base, pets, inventário, quests, conquistas, títulos e loja cosmética ficam nesta camada opcional.</p></div>
+  <div class="panel setting-section"><h3>Aplicativo</h3><p class="muted">A V2.4 é instalável como PWA. O shell do aplicativo fica em cache para abrir mais rápido; seus registros continuam sincronizados com o Supabase.</p><div class="actions" style="justify-content:flex-start"><button class="secondary" data-install-app ${standalone?"disabled":""}>${standalone?"Aplicativo instalado":"Instalar aplicativo"}</button></div></div>
+  <div class="panel setting-section"><h3>Backup e portabilidade</h3><p class="muted">JSON preserva a estrutura completa de dados. CSV gera uma linha do tempo tabular para planilhas. A restauração JSON mescla registros do próprio backup; anexos binários não fazem parte do JSON.</p><div class="actions" style="justify-content:flex-start"><button data-full-export>Backup JSON</button><button class="secondary" data-export-csv>Exportar CSV</button><button class="secondary" data-import-backup>Restaurar JSON</button><input id="backupImport" type="file" accept="application/json,.json" hidden></div></div>
+  <div class="panel setting-section"><h3>${APP_VERSION}</h3><p class="muted">Versão estável para uso prolongado. Novas funcionalidades ficam congeladas por enquanto; prioridade é acumular histórico e observar o uso real.</p><div class="version-row"><span class="version-pill">Greene Monitor ${APP_VERSION}</span><span>${navigator.onLine?"Online":"Offline"}</span></div></div></div></div>`;
+}
+function privacyPage(){
+  return `<div class="privacy-hero panel"><small>PRIVACIDADE & DADOS</small><h2>Seus registros continuam seus.</h2><p class="muted">Esta página resume como a versão atual organiza seus dados e quais controles estão disponíveis.</p></div><div class="privacy-grid"><div class="panel"><h3>Armazenamento</h3><p>Registros pessoais ficam no banco do Supabase associado ao projeto. O GitHub Pages hospeda apenas a interface estática.</p></div><div class="panel"><h3>Isolamento entre usuários</h3><p>As tabelas pessoais usam Row Level Security (RLS) para limitar cada conta aos próprios registros.</p></div><div class="panel"><h3>PWA e cache</h3><p>O Service Worker guarda arquivos da interface para carregamento rápido. Ele não cria um cache offline do seu banco pessoal.</p></div><div class="panel"><h3>Backup</h3><p>Você pode exportar JSON e CSV. O JSON contém metadados dos anexos, mas não inclui os bytes dos arquivos enviados ao Storage.</p></div><div class="panel"><h3>Restauração</h3><p>A restauração da V2.4 mescla dados de um backup JSON no usuário autenticado. Faça um novo backup antes de restaurar.</p></div><div class="panel"><h3>Exclusão</h3><p>Em Configurações, a opção de excluir conta remove a conta e os dados vinculados. Anexos são removidos do Storage antes da exclusão.</p></div></div><div class="panel privacy-footer"><b>Boa prática</b><p class="muted">Como esta é a versão estável que você pretende usar por um tempo, mantenha backups periódicos fora do navegador.</p><button class="secondary" data-go="settings">Voltar às configurações</button></div>`;
+}
+function showOnboarding(){
+  if(!S.user||S.profile?.onboarding_completed||document.querySelector("#onboarding"))return;
+  document.body.insertAdjacentHTML("beforeend",`<div id="onboarding" class="onboarding-backdrop"><section class="panel onboarding-card"><div class="onboarding-step">PRIMEIRO ACESSO · ${APP_VERSION}</div><h2>Monte seu espaço</h2><p class="muted">Você pode mudar tudo depois em Configurações.</p><form data-form="onboarding"><div class="form"><div class="field"><label>Nome do espaço</label><input name="app_name" maxlength="40" value="${esc(S.profile?.app_name||"Greene")}" required></div><div class="field"><label>Seu nome / apelido</label><input name="display_name" value="${esc(S.profile?.display_name||"")}"></div><div class="field"><label>Tema</label><select name="theme_pack"><option value="minimal">Minimal</option><option value="forest">Forest</option><option value="midnight">Midnight</option><option value="paper">Paper</option><option value="arcane">Arcane</option><option value="cyber">Cyber</option></select></div><div class="field"><label>Cor de destaque</label><select name="accent"><option value="sage">Sage</option><option value="blue">Blue</option><option value="violet">Violet</option><option value="amber">Amber</option><option value="rose">Rose</option></select></div><div class="field"><label>Gamificação</label><select name="gamification_enabled"><option value="true">Ativada</option><option value="false">Desativada</option></select></div><div class="field"><label>Nome do personagem</label><input name="character_name" value="${esc(S.gameProfile?.character_name||S.profile?.display_name||"Aventureiro")}"></div><div class="field full"><label>Apresentação do avatar</label><select name="presentation"><option value="feminine">Feminina</option><option value="masculine">Masculina</option><option value="neutral" selected>Neutra</option></select></div></div><div class="actions"><button>Concluir configuração</button></div></form></section></div>`);
 }
 function headerConfig(){
-  return {today:["＋ Registrar","registerTop"],calendar:null,habits:["＋ Novo hábito","habitCreate"],notes:["＋ Nova nota","newNote"],books:["＋ Novo livro","bookCreate"],studies:["＋ Registrar estudo","studyCreate"],goals:["＋ Novo objetivo","goalCreate"],rpg:null,analysis:null,settings:null}[S.view];
+  return {today:["＋ Registrar","registerTop"],calendar:null,timeline:null,habits:["＋ Novo hábito","habitCreate"],notes:["＋ Nova nota","newNote"],books:["＋ Novo livro","bookCreate"],studies:["＋ Registrar estudo","studyCreate"],goals:["＋ Novo objetivo","goalCreate"],rpg:null,analysis:null,retrospective:null,settings:null,privacy:null}[S.view];
 }
 function render(){
-  const names={today:S.selected===today()?"Hoje":toDate(S.selected).toLocaleDateString("pt-BR",{day:"numeric",month:"long"}),calendar:"Calendário",habits:"Hábitos",notes:"Notas",books:"Leituras",studies:"Estudos",goals:"Objetivos",rpg:"Personagem",analysis:"Análises",settings:"Configurações"};
+  const names={today:S.selected===today()?"Hoje":toDate(S.selected).toLocaleDateString("pt-BR",{day:"numeric",month:"long"}),calendar:"Calendário",timeline:"Timeline",habits:"Hábitos",notes:"Notas",books:"Leituras",studies:"Estudos",goals:"Objetivos",rpg:"Personagem",analysis:"Análises",retrospective:"Retrospectiva",settings:"Configurações",privacy:"Privacidade"};
   $("#pageTitle").textContent=names[S.view]||"";document.querySelectorAll("[data-go]").forEach(x=>x.classList.toggle("active",x.dataset.go===S.view));
-  const pages={today:todayPage,calendar:calendarPage,habits:habitsPage,notes:notesPage,books:booksPage,studies:studiesPage,goals:goalsPage,rpg:rpgPage,analysis:analysisPage,settings:settingsPage};
-  $("#content").innerHTML=pages[S.view]();
+  const pages={today:todayPage,calendar:calendarPage,timeline:timelinePage,habits:habitsPage,notes:notesPage,books:booksPage,studies:studiesPage,goals:goalsPage,rpg:rpgPage,analysis:analysisPage,retrospective:retrospectivePage,settings:settingsPage,privacy:privacyPage};
+  $("#content").innerHTML=(pages[S.view]||todayPage)();
   const hc=headerConfig(),btn=$("#headerAction");if(!hc)btn.classList.add("hidden");else{btn.classList.remove("hidden");btn.textContent=hc[0];btn.dataset.target=hc[1]}
 }
 async function go(view){
   if(S.view==="notes")await flushNoteSave(); S.view=view;if(view==="today")S.selected=today();
   if(view==="calendar"||view==="habits")await ensureMonth(S.selected);
   if(view==="analysis"&&!S.analytics){skeleton();await loadAnalytics();}
+  if(view==="retrospective"){skeleton();await ensureRetrospectiveData();}
   if(view==="goals")await ensureAutoGoalData();
   if(view==="rpg")await syncGame(true);
   if(view==="notes"){
@@ -584,24 +726,64 @@ async function go(view){
 function openPalette(){renderCommands("");$("#palette").classList.remove("hidden");$("#palette").setAttribute("aria-hidden","false");setTimeout(()=>$("#commandInput").focus(),20)}
 function closePalette(){$("#palette").classList.add("hidden");$("#palette").setAttribute("aria-hidden","true");$("#commandInput").value=""}
 function renderCommands(q){
-  q=(q||"").trim().toLowerCase();const actions=[["Nova nota","Criar nota","notes","newnote"],["Nota diária","Abrir/criar hoje","notes","daily"],["Registrar leitura","Abrir Hoje","today",""],["Registrar estudo","Abrir Estudos","studies",""],["Marcar hábito","Abrir Hábitos","habits",""],["Abrir calendário","Calendário","calendar",""],["Personagem RPG","XP, quests e avatar","rpg",""],["Configurações","Personalizar","settings",""]];
+  q=(q||"").trim().toLowerCase();
+  const actions=[["Nova nota","Criar nota","notes","newnote"],["Nota diária","Abrir/criar hoje","notes","daily"],["Registrar leitura","Abrir Hoje","today",""],["Registrar estudo","Abrir Estudos","studies",""],["Marcar hábito","Abrir Hábitos","habits",""],["Abrir calendário","Calendário","calendar",""],["Abrir timeline","Linha do tempo","timeline",""],["Retrospectiva","Semana, mês e ano","retrospective",""],["Personagem RPG","Mundo, quests e avatar","rpg",""],["Configurações","Personalizar","settings",""],["Privacidade","Dados e controles","privacy",""]];
   let results=actions.filter(x=>!q||x.join(" ").toLowerCase().includes(q)).map(x=>`<button class="command-item" data-command="${x[2]}" data-command-action="${x[3]}"><span>${x[0]}</span><small>${x[1]}</small></button>`);
-  if(q){results.push(...S.notes.filter(n=>(n.title+" "+(n.tags||[]).join(" ")).toLowerCase().includes(q)).slice(0,8).map(n=>`<button class="command-item" data-note-open="${n.id}"><span>▤ ${esc(n.title)}</span><small>Nota</small></button>`),...S.books.filter(b=>(b.title+" "+(b.author||"")).toLowerCase().includes(q)).slice(0,4).map(b=>`<button class="command-item" data-command="books"><span>▥ ${esc(b.title)}</span><small>Livro</small></button>`),...S.studies.filter(s=>(s.subject+" "+(s.learned||"")).toLowerCase().includes(q)).slice(0,4).map(s=>`<button class="command-item" data-command="studies"><span>◷ ${esc(s.subject)}</span><small>Estudo</small></button>`));}
-  $("#commandResults").innerHTML=`<div class="command-results">${results.join("")||"<div class='muted' style='padding:12px'>Nenhum resultado.</div>"}</div>`;
+  $("#commandResults").innerHTML=`<div class="command-results">${results.join("")||(!q?"":"<div class='muted search-wait'>Buscando no seu histórico…</div>")}</div>`;
+  clearTimeout(searchTimer);const seq=++searchSeq;if(q.length<2)return;
+  searchTimer=setTimeout(()=>remoteSearch(q,seq),180);
+}
+async function remoteSearch(q,seq){
+  const {data,error}=await sb.rpc("search_my_greene",{p_query:q});if(seq!==searchSeq)return;if(error){return}
+  S.searchResults=data||[];const box=$("#commandResults .command-results");if(!box)return;
+  const icon={note:"▤",book:"▥",study:"◷",journal:"⌂",goal:"◎",habit:"✓",exercise:"◇",reading:"▥"};
+  const html=S.searchResults.map(r=>`<button class="command-item" data-search-kind="${r.kind}" data-search-id="${r.entity_id}" data-search-date="${r.event_date||""}"><span>${icon[r.kind]||"•"} ${esc(r.label)}</span><small>${esc((r.detail||r.kind).slice(0,50))}</small></button>`).join("");
+  const wait=box.querySelector(".search-wait");if(wait)wait.remove();box.insertAdjacentHTML("beforeend",html||`<div class="muted" style="padding:12px">Nenhum resultado no histórico.</div>`);
 }
 async function updateDashboardCards(cards){
   const {data,error}=await sb.from("profiles").update({dashboard_cards:cards,updated_at:new Date().toISOString()}).eq("user_id",S.user.id).select().single();if(error)return toast(error.message);S.profile=data;render();
 }
 async function exportAll(){
-  toast("Preparando backup…",5000);const tables=["daily_entries","sleep_entries","habits","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries","notes","note_attachments","note_folders","note_templates","note_relations","profiles","game_profiles","game_inventory","game_user_achievements","game_quests","game_quest_progress"],out={version:"2.3",exported_at:new Date().toISOString(),user_email:S.user.email,data:{}};
-  try{for(const t of tables)out.data[t]=await fetchPaged(t,q=>q);}catch(e){toast("Falha no backup: "+e.message);return}
-  const blob=new Blob([JSON.stringify(out,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`${(S.profile?.app_name||"greene").toLowerCase().replace(/[^a-z0-9]+/g,"-")}-backup-${today()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);toast("Backup gerado");
+  setSyncState("loading","Preparando backup…");toast("Preparando backup…",5000);const tables=["daily_entries","sleep_entries","habits","habit_logs","books","studies","goals","reading_logs","exercise_logs","journal_entries","notes","note_attachments","note_folders","note_templates","note_relations","profiles","game_profiles","game_inventory","game_user_achievements","game_quests","game_quest_progress"],out={version:"2.4",edition:"stable",exported_at:new Date().toISOString(),user_email:S.user.email,data:{}};
+  try{for(const t of tables)out.data[t]=await fetchPaged(t,q=>q);}catch(e){setSyncState("error");toast("Falha no backup: "+e.message);return}
+  const blob=new Blob([JSON.stringify(out,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`${(S.profile?.app_name||"greene").toLowerCase().replace(/[^a-z0-9]+/g,"-")}-backup-${today()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);syncOk();toast("Backup gerado");
 }
+function csvCell(v){const s=String(v??"").replaceAll('"','""');return /[;"\n]/.test(s)?`"${s}"`:s}
+async function exportCsv(){
+  setSyncState("loading","Gerando CSV…");toast("Preparando CSV…",4000);
+  try{
+    const [daily,sleep,habits,hl,books,reads,studies,exercise,journal]=await Promise.all([fetchPaged("daily_entries"),fetchPaged("sleep_entries"),fetchPaged("habits"),fetchPaged("habit_logs"),fetchPaged("books"),fetchPaged("reading_logs"),fetchPaged("studies"),fetchPaged("exercise_logs"),fetchPaged("journal_entries")]);
+    const hm=new Map(habits.map(x=>[x.id,x.name])),bm=new Map(books.map(x=>[x.id,x.title])),rows=[];
+    daily.forEach(x=>rows.push([x.date,"check-in","Dia",`energia=${x.energy}; humor=${x.mood}; foco=${x.focus}; estresse=${x.stress}`,x.notes||""]));
+    sleep.forEach(x=>rows.push([x.date,"sono","Sono",`${fmt1(hours(x))} horas`,`qualidade ${x.quality}/5`]));
+    hl.filter(x=>x.completed).forEach(x=>rows.push([x.date,"hábito",hm.get(x.habit_id)||"Hábito","concluído",1]));
+    reads.forEach(x=>rows.push([x.date,"leitura",bm.get(x.book_id)||"Livro",`${x.pages_read} páginas`,x.minutes||""]));
+    studies.forEach(x=>rows.push([x.date,"estudo",x.subject,x.learned||"",x.minutes]));
+    exercise.forEach(x=>rows.push([x.date,"exercício",x.activity,x.note||"",x.minutes||""]));
+    journal.forEach(x=>rows.push([x.date,"diário",x.title||"Diário",x.body||"",(x.tags||[]).join(", ")]));
+    rows.sort((a,b)=>String(a[0]).localeCompare(String(b[0])));const csv='\ufeffData;Tipo;Item;Detalhe;Valor\n'+rows.map(r=>r.map(csvCell).join(';')).join('\n');
+    const blob=new Blob([csv],{type:"text/csv;charset=utf-8"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`${(S.profile?.app_name||"greene").toLowerCase().replace(/[^a-z0-9]+/g,"-")}-dados-${today()}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);syncOk();toast("CSV gerado");
+  }catch(err){setSyncState("error");toast("Falha no CSV: "+err.message,3500)}
+}
+async function restoreBackupFile(file){
+  let backup;try{backup=JSON.parse(await file.text())}catch{return toast("Arquivo JSON inválido")};if(!backup?.data)return toast("Este arquivo não parece ser um backup do Greene");
+  if(!confirm(`Restaurar/mesclar o backup ${backup.version||""} nesta conta? Faça um backup atual antes de continuar.`))return;
+  const order=["profiles","game_profiles","habits","books","goals","note_folders","note_templates","notes","daily_entries","sleep_entries","studies","reading_logs","exercise_logs","journal_entries","habit_logs","note_relations","game_inventory","game_user_achievements"];
+  const conflicts={profiles:"user_id",game_profiles:"user_id",daily_entries:"user_id,date",sleep_entries:"user_id,date",journal_entries:"user_id,date",habit_logs:"user_id,habit_id,date",game_inventory:"user_id,item_key",game_user_achievements:"user_id,achievement_key"};
+  setSyncState("saving","Restaurando…");toast("Restaurando backup…",8000);
+  try{
+    for(const table of order){let rows=backup.data[table];if(!Array.isArray(rows)||!rows.length)continue;rows=rows.map(r=>({...r,user_id:S.user.id}));for(let i=0;i<rows.length;i+=100){const {error}=await sb.from(table).upsert(rows.slice(i,i+100),{onConflict:conflicts[table]||"id"});if(error)throw new Error(`${table}: ${error.message}`)}}
+    S.loadedMonths.clear();S.retrospectiveYearLoaded=false;S.analytics=null;await load();render();syncOk();toast("Backup restaurado e mesclado",3500);
+  }catch(err){setSyncState("error");toast("Falha na restauração: "+err.message,5000)}
+}
+
 document.addEventListener("click", async (e)=>{
   const g=e.target.closest("[data-go]"); if(g){await go(g.dataset.go);return}
   if(e.target.closest("[data-palette]")){openPalette();return}
   const openRpg=e.target.closest("[data-open-rpg]");if(openRpg){S.rpgTab="overview";await go("rpg");return}
   const rt=e.target.closest("[data-rpg-tab]");if(rt){S.rpgTab=rt.dataset.rpgTab;render();return}
+  const wi=e.target.closest("[data-room-item]");if(wi){if(wi.dataset.locked==="true"){const item=gameItem(wi.dataset.roomItem);toast(unlockText(item)||"Item bloqueado");return}S.gameProfile.room_config={...roomConfig(),[wi.dataset.roomCategory]:wi.dataset.roomItem};render();return}
+  if(e.target.closest("[data-save-room]")){setSyncState("saving");const {data,error}=await sb.from("game_profiles").update({room_config:roomConfig(),updated_at:new Date().toISOString()}).eq("user_id",S.user.id).select().single();if(error){setSyncState("error");return toast(error.message)}S.gameProfile=data;syncOk();render();toast("Base salva");return}
   if(e.target.closest("[data-enable-game]")){const {data,error}=await sb.from("profiles").update({gamification_enabled:true,updated_at:new Date().toISOString()}).eq("user_id",S.user.id).select().single();if(error)return toast(error.message);S.profile=data;await syncGame(true);S.rpgTab="overview";render();return}
   const ap=e.target.closest("[data-avatar-prop]");if(ap){captureAvatarForm();S.gameProfile.avatar_config={...avatarConfig(),[ap.dataset.avatarProp]:ap.dataset.avatarValue};render();return}
   const ai=e.target.closest("[data-avatar-item]");if(ai){captureAvatarForm();if(ai.dataset.locked==="true"){const item=gameItem(ai.dataset.avatarItem);toast(unlockText(item)||"Item bloqueado");return}const item=gameItem(ai.dataset.avatarItem),prop=ai.dataset.avatarItem==="none"?"accessory":item?.category==="hair"?"hair":item?.category==="outfit"?"outfit":"accessory";S.gameProfile.avatar_config={...avatarConfig(),[prop]:ai.dataset.avatarItem};render();return}
@@ -613,7 +795,7 @@ document.addEventListener("click", async (e)=>{
   if(e.target.id==="levelUp"||e.target.closest("[data-level-close]")){document.querySelector("#levelUp")?.remove();return}
   const r=e.target.closest("[data-rate]"); if(r){const f=r.closest("form");f.querySelectorAll(`[data-rate="${r.dataset.rate}"]`).forEach(x=>x.classList.remove("on"));r.classList.add("on");f.querySelector(`[name="${r.dataset.rate}"]`).value=r.dataset.v;return}
   const d=e.target.closest("[data-del]"); if(d){const row=(S[stateKey[d.dataset.del]]||[]).find(x=>x.id===d.dataset.id);const ok=await deleteLocal(d.dataset.del,d.dataset.id,true);if(ok&&d.dataset.del==="habits")S.habit_logs=S.habit_logs.filter(x=>x.habit_id!==row?.id);if(ok&&d.dataset.del==="books")S.reading_logs=S.reading_logs.filter(x=>x.book_id!==row?.id);if(ok)render();return}
-  const t=e.target.closest("[data-toggle]"); if(t){const old=S.habit_logs.find(x=>x.habit_id===t.dataset.toggle&&x.date===t.dataset.date);if(old){const {error}=await sb.from("habit_logs").delete().eq("id",old.id);if(error)return toast(error.message);S.habit_logs=S.habit_logs.filter(x=>x.id!==old.id)}else{const {data,error}=await sb.from("habit_logs").insert({user_id:S.user.id,habit_id:t.dataset.toggle,date:t.dataset.date,completed:true}).select().single();if(error)return toast(error.message);mergeRows("habit_logs",[data])}scheduleGameSync();render();return}
+  const t=e.target.closest("[data-toggle]"); if(t){if(!navigator.onLine){setSyncState("offline","Sem conexão");toast("A marcação de hábitos precisa de conexão.");return}setSyncState("saving");const old=S.habit_logs.find(x=>x.habit_id===t.dataset.toggle&&x.date===t.dataset.date);if(old){const {error}=await sb.from("habit_logs").delete().eq("id",old.id);if(error){setSyncState("error");return toast(error.message)}S.habit_logs=S.habit_logs.filter(x=>x.id!==old.id)}else{const {data,error}=await sb.from("habit_logs").insert({user_id:S.user.id,habit_id:t.dataset.toggle,date:t.dataset.date,completed:true}).select().single();if(error){setSyncState("error");return toast(error.message)}mergeRows("habit_logs",[data])}scheduleGameSync();syncOk();render();return}
   const dt=e.target.closest("[data-date]"); if(dt){S.selected=dt.dataset.date;await ensureMonth(S.selected);S.view="today";render();return}
   const mo=e.target.closest("[data-month]"); if(mo){const d0=toDate(S.selected);d0.setMonth(d0.getMonth()+(+mo.dataset.month));d0.setDate(1);S.selected=iso(d0);await ensureMonth(S.selected);render();return}
   const ni=e.target.closest("[data-note]"); if(ni){await flushNoteSave();S.selectedNote=ni.dataset.note;S.notePreview=false;S.backlinks=[];await loadNoteContent(S.selectedNote);render();return}
@@ -635,6 +817,12 @@ document.addEventListener("click", async (e)=>{
   const ad=e.target.closest("[data-attachment-delete]"); if(ad&&confirm("Excluir este anexo?")){const a=S.note_attachments.find(x=>x.id===ad.dataset.attachmentDelete);const {error}=await sb.from("note_attachments").delete().eq("id",a.id);if(error)return toast(error.message);S.note_attachments=S.note_attachments.filter(x=>x.id!==a.id);render();await sb.storage.from("notes-attachments").remove([a.storage_path]);toast("Anexo excluído");return}
   if(e.target.closest("[data-add-relation]")){const raw=$("#relationTarget")?.value;if(!raw||!S.selectedNote)return;const [type,val]=raw.split(":"),payload={user_id:S.user.id,note_id:S.selectedNote,entity_type:type,label:null};if(type==="day")payload.entity_date=val;else payload.entity_id=val;const {data,error}=await sb.from("note_relations").insert(payload).select().single();if(error)return toast(error.message);S.note_relations.unshift(data);render();return}
   const rd=e.target.closest("[data-relation-delete]"); if(rd){const {error}=await sb.from("note_relations").delete().eq("id",rd.dataset.relationDelete);if(error)return toast(error.message);S.note_relations=S.note_relations.filter(x=>x.id!==rd.dataset.relationDelete);render();return}
+  if(e.target.closest("[data-load-older]")){await loadOlderHistory();return}
+  const tev=e.target.closest("[data-timeline-view]");if(tev){const view=tev.dataset.timelineView,date=tev.dataset.timelineDate;if(view==="today"){S.selected=date;await ensureMonth(date);S.view="today";render()}else if(view==="rpg"){S.rpgTab="achievements";await go("rpg")}else await go(view);return}
+  if(e.target.closest("[data-install-app]")){if(window.matchMedia?.("(display-mode: standalone)")?.matches||navigator.standalone===true)return toast("O aplicativo já está instalado");if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;return}toast(/iphone|ipad|ipod/i.test(navigator.userAgent)?"No iPhone/iPad: Compartilhar → Adicionar à Tela de Início.":"A opção de instalação aparecerá quando o navegador considerar o app instalável.",4200);return}
+  if(e.target.closest("[data-export-csv]")){await exportCsv();return}
+  if(e.target.closest("[data-import-backup]")){document.querySelector("#backupImport")?.click();return}
+  const sr=e.target.closest("[data-search-kind]");if(sr){closePalette();const kind=sr.dataset.searchKind,id=sr.dataset.searchId,date=sr.dataset.searchDate;if(kind==="note"){let n=S.notes.find(x=>x.id===id);if(!n){const r=await sb.from("notes").select("id,user_id,title,tags,is_favorite,folder_id,note_type,linked_date,created_at,updated_at").eq("id",id).single();if(r.data){n=r.data;S.notes.unshift(n)}}if(n){S.selectedNote=id;S.view="notes";await loadNoteContent(id);render()}return}if(["journal","exercise","reading"].includes(kind)&&date){S.selected=date;await ensureMonth(date);S.view="today";render();return}await go(({book:"books",study:"studies",goal:"goals",habit:"habits"}[kind]||"timeline"));return}
   const range=e.target.closest("[data-range]"); if(range){S.analyticsRange=range.dataset.range==="custom"?"custom":+range.dataset.range;if(S.analyticsRange==="custom"){const [a,b]=rangeDates();S.analyticsCustomStart=a;S.analyticsCustomEnd=b}S.analytics=null;skeleton();await loadAnalytics();render();return}
   if(e.target.closest("[data-apply-range]")){S.analyticsCustomStart=$("#analysisStart").value;S.analyticsCustomEnd=$("#analysisEnd").value;if(!S.analyticsCustomStart||!S.analyticsCustomEnd||S.analyticsCustomStart>S.analyticsCustomEnd)return toast("Verifique o período");S.analytics=null;skeleton();await loadAnalytics();render();return}
   const ct=e.target.closest("[data-card-toggle]"); if(ct){let cards=Array.isArray(S.profile.dashboard_cards)?[...S.profile.dashboard_cards]:[...defaultCards];if(ct.checked){if(!cards.includes(ct.dataset.cardToggle))cards.push(ct.dataset.cardToggle)}else cards=cards.filter(x=>x!==ct.dataset.cardToggle);await updateDashboardCards(cards);return}
@@ -660,7 +848,8 @@ document.addEventListener("submit", async (e)=>{
   if(t==="goal"){const auto=x.goal_mode==="auto",payload={title:x.title,deadline:x.deadline||null,progress:auto?0:(+x.progress||0),notes:x.notes||null,date:today(),status:"Ativo",auto_track:auto,metric:auto?x.metric:null,target_value:auto?(+x.target_value||1):null,period:auto?x.period:"all",start_date:today()};const d=await insertLocal("goals",payload);if(d)render();return}
   if(t==="journal"){x.tags=x.tags?x.tags.split(",").map(s=>s.trim()).filter(Boolean):[];await upsertDateLocal("journal_entries",x);return}
   if(t==="note"){clearTimeout(noteSaveTimer);noteSaveTimer=null;x.tags=x.tags?x.tags.split(",").map(s=>s.trim()).filter(Boolean):[];x.folder_id=x.folder_id||null;await persistNote(f.dataset.id,x);render();return}
-  if(t==="profile"){const payload={app_name:x.app_name.trim(),display_name:x.display_name.trim()||null,accent:x.accent,gamification_enabled:x.gamification_enabled==="true",updated_at:new Date().toISOString()};const {data,error}=await sb.from("profiles").update(payload).eq("user_id",S.user.id).select().single();if(error)return toast(error.message);S.profile=data;applyProfile();if(S.profile.gamification_enabled)await syncGame(true);render();toast("Personalização salva");return}
+  if(t==="profile"){setSyncState("saving");const payload={app_name:x.app_name.trim(),display_name:x.display_name.trim()||null,accent:x.accent,theme_pack:x.theme_pack||"minimal",rpg_display_mode:x.rpg_display_mode||"full",gamification_enabled:x.gamification_enabled==="true",updated_at:new Date().toISOString()};const {data,error}=await sb.from("profiles").update(payload).eq("user_id",S.user.id).select().single();if(error){setSyncState("error");return toast(error.message)}S.profile=data;applyProfile();if(S.profile.gamification_enabled)await syncGame(true);syncOk();render();toast("Personalização salva");return}
+  if(t==="onboarding"){setSyncState("saving");const pp={app_name:x.app_name.trim(),display_name:x.display_name.trim()||null,accent:x.accent||"sage",theme_pack:x.theme_pack||"minimal",gamification_enabled:x.gamification_enabled==="true",rpg_display_mode:"full",onboarding_completed:true,updated_at:new Date().toISOString()},gp={character_name:(x.character_name||"Aventureiro").trim()||"Aventureiro",presentation:x.presentation||"neutral",updated_at:new Date().toISOString()};const [a,b]=await Promise.all([sb.from("profiles").update(pp).eq("user_id",S.user.id).select().single(),sb.from("game_profiles").update(gp).eq("user_id",S.user.id).select().single()]);if(a.error||b.error){setSyncState("error");return toast((a.error||b.error).message)}S.profile=a.data;S.gameProfile=b.data;applyProfile();document.querySelector("#onboarding")?.remove();if(S.profile.gamification_enabled)await syncGame(true);syncOk();render();toast("Seu espaço está pronto");return}
   if(t==="game-profile"){const payload={character_name:x.character_name.trim(),presentation:x.presentation,avatar_config:avatarConfig(),updated_at:new Date().toISOString()};const {data,error}=await sb.from("game_profiles").update(payload).eq("user_id",S.user.id).select().single();if(error)return toast(error.message);S.gameProfile=data;render();toast("Personagem salvo");return}
   if(t==="password"){if((x.password||"").length<8)return toast("Use pelo menos 8 caracteres");const {error}=await sb.auth.updateUser({password:x.password});toast(error?error.message:"Senha alterada");if(!error)f.reset();return}
 });
@@ -673,6 +862,7 @@ document.addEventListener("input",(e)=>{
 
 document.addEventListener("change", async (e)=>{
   if(e.target.closest('form[data-form="game-profile"]')&&e.target.name==="presentation"){captureAvatarForm();render();return}
+  if(e.target.id==="backupImport"){const file=e.target.files?.[0];e.target.value="";if(file)await restoreBackupFile(file);return}
   if(e.target.id!=="attachmentInput"||!e.target.files?.[0]||!S.selectedNote)return;
   const file=e.target.files[0];if(file.size>20*1024*1024)return toast("Limite de 20 MB por arquivo");const safe=file.name.replace(/[^\w.\-]+/g,"_"),path=`${S.user.id}/${S.selectedNote}/${Date.now()}-${safe}`;toast("Enviando anexo…",4000);
   const {error}=await sb.storage.from("notes-attachments").upload(path,file,{upsert:false});if(error)return toast(error.message);const {data:att,error:dbErr}=await sb.from("note_attachments").insert({user_id:S.user.id,note_id:S.selectedNote,file_name:file.name,storage_path:path,mime_type:file.type||null,size_bytes:file.size}).select().single();if(dbErr){await sb.storage.from("notes-attachments").remove([path]);return toast(dbErr.message)}S.note_attachments.unshift(att);render();toast("Anexo enviado");
@@ -690,5 +880,5 @@ $("#export").onclick=exportAll;
 
 if(sb)sb.auth.onAuthStateChange(async(event,session)=>{
   S.user=session?.user||null;$("#auth").classList.toggle("hidden",!!S.user);$("#shell").classList.toggle("hidden",!S.user);
-  if(S.user){skeleton();try{await load();if(event==="PASSWORD_RECOVERY")S.view="settings";render();if(event==="PASSWORD_RECOVERY")toast("Defina sua nova senha em Configurações",3500)}catch(err){console.error(err);toast("Erro ao carregar: "+err.message,5000)}}
+  if(S.user){setSyncState(navigator.onLine?"loading":"offline",navigator.onLine?"Sincronizando…":"Sem conexão");skeleton();try{await load();if(event==="PASSWORD_RECOVERY")S.view="settings";render();syncOk();showOnboarding();if(event==="PASSWORD_RECOVERY")toast("Defina sua nova senha em Configurações",3500)}catch(err){console.error(err);setSyncState(navigator.onLine?"error":"offline");toast("Erro ao carregar: "+err.message,5000)}}else{document.querySelector("#onboarding")?.remove()}
 });

@@ -1,0 +1,15 @@
+{
+  "name": "Greene Monitor 2.4 Stable",
+  "short_name": "Greene",
+  "description": "Monitor pessoal de hábitos, sono, leitura, estudos, notas, objetivos e progressão RPG.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f110f",
+  "theme_color": "#73866f",
+  "orientation": "any",
+  "icons": [
+    {"src":"icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}

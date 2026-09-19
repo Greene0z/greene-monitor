@@ -4,7 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#101210">
-  <title>Greene Monitor V2.3</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Greene">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>Greene Monitor 2.4 Stable</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -27,13 +33,14 @@
       <div class="brand"><span id="brandLogo">G</span><b id="brandName">Greene</b></div>
       <nav id="desktopNav"></nav>
       <div class="aside-bottom">
+        <div id="syncStatus" class="sync-status" data-state="loading"><i></i><span>Conectando…</span></div>
         <button id="theme" class="secondary">◐ Tema</button>
         <button id="export" class="secondary">⇩ Backup</button>
         <button id="logout" class="secondary">Sair</button>
       </div>
     </aside>
     <main>
-      <header><div><small id="dateText"></small><h1 id="pageTitle"></h1></div><button id="headerAction" class="header-action"></button></header>
+      <header><div><small id="dateText"></small><h1 id="pageTitle"></h1></div><div class="header-tools"><div class="sync-status header-sync" data-state="loading"><i></i><span>Conectando…</span></div><button id="headerAction" class="header-action"></button></div></header>
       <div id="content"></div>
     </main>
     <nav id="mobileNav"></nav>
