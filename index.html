@@ -4,66 +4,45 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#101210">
-  <title>Greene Monitor V2.1</title>
+  <title>Greene Monitor V2.2</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="auth" class="auth">
-    <div class="auth-orb orb-a"></div>
-    <div class="auth-orb orb-b"></div>
+    <div class="auth-orb orb-a"></div><div class="auth-orb orb-b"></div>
     <section class="panel login-card">
-      <div class="logo">G</div>
-      <div>
-        <h1>Greene</h1>
-        <p>Seu espaço pessoal para acompanhar, registrar e pensar.</p>
-      </div>
+      <div class="logo" id="loginLogo">G</div>
+      <div><h1 id="loginBrand">Greene</h1><p>Seu espaço pessoal para acompanhar, registrar e pensar.</p></div>
       <input id="email" type="email" placeholder="E-mail" autocomplete="email">
       <input id="password" type="password" placeholder="Senha" autocomplete="current-password">
       <button id="login">Entrar</button>
       <button id="signup" class="secondary">Criar conta</button>
+      <button id="forgot" class="link-button">Esqueci minha senha</button>
       <small id="authmsg"></small>
     </section>
   </div>
 
   <div id="shell" class="hidden">
     <aside>
-      <div class="brand"><span>G</span><b>Greene</b></div>
+      <div class="brand"><span id="brandLogo">G</span><b id="brandName">Greene</b></div>
       <nav id="desktopNav"></nav>
       <div class="aside-bottom">
         <button id="theme" class="secondary">◐ Tema</button>
-        <button id="export" class="secondary">⇩ Exportar</button>
+        <button id="export" class="secondary">⇩ Backup</button>
         <button id="logout" class="secondary">Sair</button>
       </div>
     </aside>
-
     <main>
-      <header>
-        <div>
-          <small id="dateText"></small>
-          <h1 id="pageTitle"></h1>
-        </div>
-        <button id="headerAction" class="header-action"></button>
-      </header>
+      <header><div><small id="dateText"></small><h1 id="pageTitle"></h1></div><button id="headerAction" class="header-action"></button></header>
       <div id="content"></div>
     </main>
-
     <nav id="mobileNav"></nav>
   </div>
 
   <div id="palette" class="modal-backdrop hidden" aria-hidden="true">
-    <section class="command-panel">
-      <div class="command-search">
-        <span>⌘</span>
-        <input id="commandInput" placeholder="Buscar ou digitar um comando..." autocomplete="off">
-        <kbd>Esc</kbd>
-      </div>
-      <div id="commandResults"></div>
-    </section>
+    <section class="command-panel"><div class="command-search"><span>⌘</span><input id="commandInput" placeholder="Buscar ou digitar um comando..." autocomplete="off"><kbd>Esc</kbd></div><div id="commandResults"></div></section>
   </div>
-
   <div id="toast"></div>
-
-  <script src="config.js"></script>
-  <script type="module" src="app.js"></script>
+  <script src="config.js"></script><script type="module" src="app.js"></script>
 </body>
 </html>
