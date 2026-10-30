@@ -1,8 +1,9 @@
-const CACHE = "greene-monitor-2.4-stable-v1";
+const CACHE = "greene-monitor-2.5-purple-v1";
 const SHELL = [
   "./",
   "./index.html",
   "./style.css",
+  "./theme-purple.css",
   "./app.js",
   "./manifest.webmanifest",
   "./icon-192.png",
